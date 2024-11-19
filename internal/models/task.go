@@ -1,5 +1,5 @@
 package models
 
 type Task struct {
-	Duration int // Duración en segundos
+	Duration int `json:"duration"`
 }

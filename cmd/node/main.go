@@ -1,48 +1,65 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"so-project-2/internal/models"
+	"syscall"
 )
 
 func main() {
-	// Definir flags para recibir parámetros desde la línea de comandos
-	idFlag := flag.String("id", "", "Node ID (default from NODE_ID environment variable)")
-	hostFlag := flag.String("host", "", "Node host and port (default from NODE_HOST environment variable)")
-	parentHostFlag := flag.String("parent", "", "Parent host and port (default from PARENT_HOST environment variable)")
+	portFlag := flag.String("port", "", "Node port")
 	flag.Parse()
 
-	// Usar variables de entorno si no se proporcionaron flags
-	nodeID := getEnvOrDefault("NODE_ID", *idFlag)
-	nodeHost := getEnvOrDefault("NODE_HOST", *hostFlag)
-	parentHost := getEnvOrDefault("PARENT_HOST", *parentHostFlag)
-
-	// Validar que todos los parámetros estén configurados
-	if nodeID == "" || nodeHost == "" || parentHost == "" {
-		log.Fatal("Missing required parameters: id, host, or parent")
+	nodePort := getEnvOrDefault("NODE_PORT", *portFlag)
+	if nodePort == "" {
+		log.Fatal("Missing required parameter: port")
 	}
 
-	// Crear el nodo
-	node := models.NewNode(nodeID, nodeHost, parentHost)
+	node := models.NewNode("localhost", nodePort)
 
-	// Registrar el nodo con el nodo padre
-	if err := node.RegisterWithParent(); err != nil {
-		log.Fatalf("Failed to register node with parent: %v", err)
+	// Register routes
+	http.HandleFunc("/ping", node.Ping)
+	http.HandleFunc("/status", node.GetStatus)
+	http.HandleFunc("/peer", node.AddPeer)
+	http.HandleFunc("/unpeer", node.RemovePeer)
+	http.HandleFunc("/shutdown", node.Shutdown)
+	http.HandleFunc("/task", node.AddTask)
+
+	// Start node server with graceful shutdown
+	server := &http.Server{Addr: ":" + node.Port}
+
+	// Goroutine para manejar el servidor HTTP
+	go func() {
+		fmt.Printf("Node started at %s:%s\n", node.Host, node.Port)
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
+	// Task loop
+	go node.TaskLoop()
+
+	// Signal handling
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+	sig := <-signalChan
+	log.Printf("Received signal: %v. Shutting down gracefully...", sig)
+	node.Cleanup()
+
+	// Apagar el servidor HTTP
+	if err := server.Shutdown(context.Background()); err != nil {
+		log.Fatalf("Error shutting down server: %v", err)
 	}
 
-	// Configurar rutas
-	http.HandleFunc("/process", node.ProcessTask)
-
-	// Iniciar servidor
-	fmt.Printf("Node %s running on %s\n", node.ID, node.Host)
-	log.Fatal(http.ListenAndServe(node.Host, nil))
+	log.Println("Server gracefully stopped.")
 }
 
-// getEnvOrDefault devuelve el valor de una variable de entorno o un valor predeterminado
 func getEnvOrDefault(envKey, fallback string) string {
 	if value := os.Getenv(envKey); value != "" {
 		return value
