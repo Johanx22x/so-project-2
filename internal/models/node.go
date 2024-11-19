@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -326,4 +327,33 @@ func (n *Node) performTask(task Task) {
 	time.Sleep(time.Duration(task.Duration) * time.Second)
 	n.IsBusy = false
 	fmt.Printf("Task completed\n")
+}
+
+func (n *Node) PeerCheckLoop() {
+	for {
+		time.Sleep(10 * time.Second) // Check every 10 seconds
+		n.mu.Lock()
+		// Check if there are peers to check
+		if len(n.peerList) == 0 {
+			n.mu.Unlock()
+			continue
+		}
+
+		for _, peer := range n.peerList {
+			// ping peer
+			resp, err := http.Get(fmt.Sprintf("http://%s:%s/ping", peer.Host, peer.Port))
+			if err != nil || resp.StatusCode != http.StatusOK {
+				log.Printf("Peer %s:%s has gone offline unexpectedly, removing from list...\n", peer.Host, peer.Port)
+				// Remove peer from list
+				for i, p := range n.peerList {
+					if p.Host == peer.Host && p.Port == peer.Port {
+						n.peerList = append(n.peerList[:i], n.peerList[i+1:]...)
+						fmt.Printf("Peer removed: %s:%s\n", peer.Host, peer.Port)
+						break
+					}
+				}
+			}
+		}
+		n.mu.Unlock()
+	}
 }

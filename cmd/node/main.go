@@ -45,6 +45,9 @@ func main() {
 	// Task loop
 	go node.TaskLoop()
 
+	// Peer checking loop
+	go node.PeerCheckLoop()
+
 	// Signal handling
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
