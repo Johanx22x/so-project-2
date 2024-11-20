@@ -28,13 +28,15 @@ func main() {
 	http.HandleFunc("/status", node.GetStatus)
 	http.HandleFunc("/peer", node.AddPeer)
 	http.HandleFunc("/unpeer", node.RemovePeer)
+	http.HandleFunc("/join", node.JoinNetwork)
 	http.HandleFunc("/shutdown", node.Shutdown)
 	http.HandleFunc("/task", node.AddTask)
+	http.HandleFunc("/resources", node.GetResources)
 	http.HandleFunc("/resource", node.AddResource)
 	http.HandleFunc("/resource/uncheck", node.AddResourceWithoutCheck)
 	http.HandleFunc("/unresource", node.RemoveResource)
-	http.HandleFunc("/resources", node.GetResources)
 	http.HandleFunc("/get-resource", node.GetResource)
+	http.HandleFunc("/request-resource", node.RequestResource)
 
 	// Start node server with graceful shutdown
 	server := &http.Server{Addr: ":" + node.Port}

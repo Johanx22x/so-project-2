@@ -254,9 +254,11 @@ func (n *Node) AddTask(w http.ResponseWriter, r *http.Request) {
 func (n *Node) TaskLoop() {
 	for {
 		n.mu.Lock()
+
 		// Check if there are tasks to do
 		if len(n.Tasks) == 0 {
 			n.mu.Unlock()
+			time.Sleep(100 * time.Millisecond) // Avoid busy waiting
 			continue
 		}
 
@@ -265,62 +267,22 @@ func (n *Node) TaskLoop() {
 			n.IsBusy = true
 
 			task := n.Tasks[0]
-			n.Tasks = n.Tasks[1:]
+			n.Tasks = n.Tasks[1:] // Remove the task from the queue
 			n.mu.Unlock()
 
-			go n.performTask(task)
+			go n.performTask(task) // Perform the task locally
 			continue
 		}
 
-		// Check if there's a peer to delegate the task to
-		if len(n.peers) == 0 {
-			n.mu.Unlock()
-			continue
-		}
-
-		for _, peer := range n.peers {
-			// Get peer status
-			resp, err := http.Get(fmt.Sprintf("http://%s:%s/status", peer.Host, peer.Port))
-			if err != nil {
-				log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to get peer status from %s:%s\n", peer.Host, peer.Port)
-				continue
-			}
-
-			// Decode peer status
-			var status struct {
-				IsBusy bool `json:"isBusy"`
-				Tasks  int  `json:"tasks"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-				log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to decode peer status from %s:%s\n", peer.Host, peer.Port)
-				continue
-			}
-
-			// Check if peer is free
-			if status.IsBusy {
-				continue
-			}
-
-			// Delegate task to peer
-			peerJSON, err := json.Marshal(n.Tasks[0])
-			if err != nil {
-				log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to marshal task data\n")
-				continue
-			}
-
-			_, err = http.Post(fmt.Sprintf("http://%s:%s/task", peer.Host, peer.Port), "application/json", bytes.NewBuffer(peerJSON))
-			if err != nil {
-				log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to delegate task to %s:%s\n", peer.Host, peer.Port)
-				continue
-			}
-
-			// Remove task from the list
-			log.Printf("["+utils.Colorize("33", "COMM")+"] Task delegated to %s:%s\n", peer.Host, peer.Port)
+		// Attempt to delegate the task to the least loaded peer
+		task := n.Tasks[0]
+		if n.GetLeastLoadedPeer(task) {
+			// Remove task from queue if delegation was successful
 			n.Tasks = n.Tasks[1:]
-			break
 		}
 
 		n.mu.Unlock()
+		time.Sleep(100 * time.Millisecond) // Avoid busy waiting
 	}
 }
 
@@ -463,6 +425,7 @@ func (n *Node) PeerCheckLoop() {
 			resp, err := http.Get(fmt.Sprintf("http://%s:%s/ping", peer.Host, peer.Port))
 			if err != nil || resp.StatusCode != http.StatusOK {
 				log.Printf("["+utils.Colorize("33", "COMM")+"] Peer %s:%s has gone offline unexpectedly, removing from peers\n", peer.Host, peer.Port)
+				n.RedistributeTasks(peer)
 				// Remove peer from list
 				for i, p := range n.peers {
 					if p.Host == peer.Host && p.Port == peer.Port {
@@ -639,4 +602,141 @@ func (n *Node) GetResource(w http.ResponseWriter, r *http.Request) {
 	}
 	n.mu.Unlock()
 	w.WriteHeader(http.StatusNotFound)
+}
+
+func (n *Node) RedistributeTasks(failedNode Peer) {
+	log.Printf("["+utils.Colorize("33", "COMM")+"] Redistributing tasks from failed node: %s:%s\n", failedNode.Host, failedNode.Port)
+
+	for i, peer := range n.peers {
+		if peer.Host == failedNode.Host && peer.Port == failedNode.Port {
+			n.mu.Lock()
+			// Remove the failed node from the list
+			n.peers = append(n.peers[:i], n.peers[i+1:]...)
+			n.mu.Unlock()
+			break
+		}
+	}
+
+	// Redistribute tasks among remaining peers
+	for _, task := range n.Tasks {
+		go func(task Task) {
+			n.mu.Lock()
+			defer n.mu.Unlock()
+
+			for _, peer := range n.peers {
+				taskJSON, err := json.Marshal(task)
+				if err != nil {
+					log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to marshal task data for redistribution\n")
+					continue
+				}
+
+				resp, err := http.Post(fmt.Sprintf("http://%s:%s/task", peer.Host, peer.Port), "application/json", bytes.NewBuffer(taskJSON))
+				if err == nil && resp.StatusCode == http.StatusOK {
+					log.Printf("["+utils.Colorize("33", "COMM")+"] Task redistributed to peer %s:%s\n", peer.Host, peer.Port)
+					return
+				}
+			}
+
+			log.Printf("[" + utils.Colorize("31", "ERROR") + "] No available peers to redistribute task\n")
+		}(task)
+	}
+}
+
+func (n *Node) RequestResource(w http.ResponseWriter, r *http.Request) {
+	type ResourceRequest struct {
+		Path string `json:"path"`
+	}
+
+	var req ResourceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// Check if the resource exists locally
+	for _, resource := range n.Resources {
+		if resource.Path == req.Path && !resource.InUse {
+			log.Printf("["+utils.Colorize("32", "INFO")+"] Resource %s locked for use\n", req.Path)
+			for i := range n.Resources {
+				if n.Resources[i].Path == req.Path {
+					n.Resources[i].InUse = true
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
+	// Resource not found locally
+	w.WriteHeader(http.StatusNotFound)
+}
+
+func (n *Node) GetLeastLoadedPeer(task Task) bool {
+	var leastLoadedPeer *Peer
+	var minTasks = int(^uint(0) >> 1) // Max int value
+
+	for _, peer := range n.peers {
+		resp, err := http.Get(fmt.Sprintf("http://%s:%s/status", peer.Host, peer.Port))
+		if err != nil {
+			log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to get status from peer %s:%s\n", peer.Host, peer.Port)
+			continue
+		}
+
+		var status struct {
+			IsBusy bool `json:"isBusy"`
+			Tasks  int  `json:"tasks"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to decode status from peer %s:%s\n", peer.Host, peer.Port)
+			continue
+		}
+
+		// Select the peer with the least tasks
+		if !status.IsBusy && status.Tasks < minTasks {
+			minTasks = status.Tasks
+			leastLoadedPeer = &peer
+		}
+	}
+
+	// If a suitable peer is found, delegate the task
+	if leastLoadedPeer != nil {
+		taskJSON, err := json.Marshal(task)
+		if err != nil {
+			log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to marshal task data\n")
+			return false
+		}
+
+		resp, err := http.Post(fmt.Sprintf("http://%s:%s/task", leastLoadedPeer.Host, leastLoadedPeer.Port), "application/json", bytes.NewBuffer(taskJSON))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to delegate task to %s:%s\n", leastLoadedPeer.Host, leastLoadedPeer.Port)
+			return false
+		}
+
+		log.Printf("["+utils.Colorize("33", "COMM")+"] Task delegated to %s:%s\n", leastLoadedPeer.Host, leastLoadedPeer.Port)
+		return true
+	}
+
+	// No suitable peer found
+	return false
+}
+
+func (n *Node) JoinNetwork(w http.ResponseWriter, r *http.Request) {
+	var newPeer Peer
+	if err := json.NewDecoder(r.Body).Decode(&newPeer); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	n.mu.Lock()
+	n.peers = append(n.peers, newPeer)
+	n.mu.Unlock()
+
+	log.Printf("["+utils.Colorize("33", "COMM")+"] New node joined: %s:%s\n", newPeer.Host, newPeer.Port)
+
+	// Respond with current peer list
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(n.peers)
 }
