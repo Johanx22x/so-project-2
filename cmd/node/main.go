@@ -28,7 +28,6 @@ func main() {
 	http.HandleFunc("/status", node.GetStatus)
 	http.HandleFunc("/peer", node.AddPeer)
 	http.HandleFunc("/unpeer", node.RemovePeer)
-	http.HandleFunc("/join", node.JoinNetwork)
 	http.HandleFunc("/shutdown", node.Shutdown)
 	http.HandleFunc("/task", node.AddTask)
 	http.HandleFunc("/resources", node.GetResources)

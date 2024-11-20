@@ -722,21 +722,3 @@ func (n *Node) GetLeastLoadedPeer(task Task) bool {
 	// No suitable peer found
 	return false
 }
-
-func (n *Node) JoinNetwork(w http.ResponseWriter, r *http.Request) {
-	var newPeer Peer
-	if err := json.NewDecoder(r.Body).Decode(&newPeer); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	n.mu.Lock()
-	n.peers = append(n.peers, newPeer)
-	n.mu.Unlock()
-
-	log.Printf("["+utils.Colorize("33", "COMM")+"] New node joined: %s:%s\n", newPeer.Host, newPeer.Port)
-
-	// Respond with current peer list
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(n.peers)
-}
