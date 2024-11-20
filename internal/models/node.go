@@ -605,39 +605,35 @@ func (n *Node) GetResource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n *Node) RedistributeTasks(failedNode Peer) {
-	log.Printf("["+utils.Colorize("33", "COMM")+"] Redistributing tasks from failed node: %s:%s\n", failedNode.Host, failedNode.Port)
+	log.Printf("["+utils.Colorize("33", "COMM")+"] Attempting to redistribute tasks from failed node: %s:%s\n", failedNode.Host, failedNode.Port)
 
-	for i, peer := range n.peers {
-		if peer.Host == failedNode.Host && peer.Port == failedNode.Port {
-			n.mu.Lock()
-			// Remove the failed node from the list
-			n.peers = append(n.peers[:i], n.peers[i+1:]...)
-			n.mu.Unlock()
-			break
-		}
+	tasksToRedistribute := n.GetTasksFromPeers(failedNode)
+	if len(tasksToRedistribute) == 0 {
+		log.Printf("["+utils.Colorize("31", "ERROR")+"] No tasks found for failed node %s:%s\n", failedNode.Host, failedNode.Port)
+		return
 	}
 
-	// Redistribute tasks among remaining peers
-	for _, task := range n.Tasks {
+	log.Printf("["+utils.Colorize("33", "COMM")+"] Redistributing %d tasks from failed node: %s:%s\n", len(tasksToRedistribute), failedNode.Host, failedNode.Port)
+
+	for _, task := range tasksToRedistribute {
 		go func(task Task) {
 			n.mu.Lock()
-			defer n.mu.Unlock()
-
 			for _, peer := range n.peers {
-				taskJSON, err := json.Marshal(task)
+				peerJSON, err := json.Marshal(task)
 				if err != nil {
 					log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to marshal task data for redistribution\n")
 					continue
 				}
 
-				resp, err := http.Post(fmt.Sprintf("http://%s:%s/task", peer.Host, peer.Port), "application/json", bytes.NewBuffer(taskJSON))
+				resp, err := http.Post(fmt.Sprintf("http://%s:%s/task", peer.Host, peer.Port), "application/json", bytes.NewBuffer(peerJSON))
 				if err == nil && resp.StatusCode == http.StatusOK {
 					log.Printf("["+utils.Colorize("33", "COMM")+"] Task redistributed to peer %s:%s\n", peer.Host, peer.Port)
+					n.mu.Unlock()
 					return
 				}
 			}
-
 			log.Printf("[" + utils.Colorize("31", "ERROR") + "] No available peers to redistribute task\n")
+			n.mu.Unlock()
 		}(task)
 	}
 }
@@ -721,4 +717,55 @@ func (n *Node) GetLeastLoadedPeer(task Task) bool {
 
 	// No suitable peer found
 	return false
+}
+
+func (n *Node) GetTasksForNode(w http.ResponseWriter, r *http.Request) {
+	type Request struct {
+		Host string `json:"host"`
+		Port string `json:"port"`
+	}
+
+	var req Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// return tasks if the request is for this node
+	if req.Host == n.Host && req.Port == n.Port {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(n.Tasks); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// if the request is for another node, check if the node is a peer
+	w.WriteHeader(http.StatusNotFound)
+}
+
+func (n *Node) GetTasksFromPeers(failedNode Peer) []Task {
+	var tasks []Task
+
+	for _, peer := range n.peers {
+		reqBody, _ := json.Marshal(failedNode)
+		resp, err := http.Post(fmt.Sprintf("http://%s:%s/tasks-for-node", peer.Host, peer.Port), "application/json", bytes.NewBuffer(reqBody))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to get tasks for node %s:%s from peer %s:%s\n", failedNode.Host, failedNode.Port, peer.Host, peer.Port)
+			continue
+		}
+
+		var peerTasks []Task
+		if err := json.NewDecoder(resp.Body).Decode(&peerTasks); err != nil {
+			log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to decode tasks from peer %s:%s\n", peer.Host, peer.Port)
+			continue
+		}
+
+		tasks = append(tasks, peerTasks...)
+	}
+
+	return tasks
 }

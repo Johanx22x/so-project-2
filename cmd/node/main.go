@@ -36,6 +36,7 @@ func main() {
 	http.HandleFunc("/unresource", node.RemoveResource)
 	http.HandleFunc("/get-resource", node.GetResource)
 	http.HandleFunc("/request-resource", node.RequestResource)
+	http.HandleFunc("/tasks-for-node", node.GetTasksForNode)
 
 	// Start node server with graceful shutdown
 	server := &http.Server{Addr: ":" + node.Port}
