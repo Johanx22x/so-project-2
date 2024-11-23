@@ -200,12 +200,13 @@ func (n *Node) Shutdown(w http.ResponseWriter, r *http.Request) {
 func (n *Node) Cleanup() {
 	// Send unpeer request to all peers
 	n.mu.Lock()
+	defer n.mu.Unlock()
 	for _, peer := range n.peers {
 		peerJSON, err := json.Marshal(Peer{Host: n.Host, Port: n.Port})
 		if err != nil {
 			log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to send unpeer request to %s:%s\n", peer.Host, peer.Port)
 			n.mu.Unlock()
-			return
+			continue
 		}
 
 		_, err = http.Post(fmt.Sprintf("http://%s:%s/unpeer", peer.Host, peer.Port), "application/json", bytes.NewBuffer(peerJSON))
@@ -213,27 +214,43 @@ func (n *Node) Cleanup() {
 			log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to send unpeer request to %s:%s\n", peer.Host, peer.Port)
 		}
 	}
-	n.mu.Unlock()
 
-	// Delegate tasks to peers
-	n.mu.Lock()
+	// Delegate tasks to active peers
 	for _, task := range n.Tasks {
-		// Delegate to first peer
-		peer := n.peers[0]
-		peerJSON, err := json.Marshal(task)
-		if err != nil {
-			log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to marshal task data\n")
-			n.mu.Unlock()
-			return
-		}
-
-		log.Printf("["+utils.Colorize("33", "COMM")+"] Task delegated to %s:%s\n", peer.Host, peer.Port)
-		_, err = http.Post(fmt.Sprintf("http://%s:%s/task", peer.Host, peer.Port), "application/json", bytes.NewBuffer(peerJSON))
-		if err != nil {
-			log.Printf("["+utils.Colorize("31", "ERROR")+"] Failed to delegate task to %s:%s\n", peer.Host, peer.Port)
+		if !n.GetLeastLoadedPeer(task) {
+			log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to delegate task\n")
 		}
 	}
-	n.mu.Unlock()
+	// Delegate locale resources to rest of peers
+	for _, resource := range n.Resources {
+		n.RedistributeResource(resource)
+	}
+
+	log.Printf("[" + utils.Colorize("33", "COMM") + "] Node is shutting down\n")
+	os.Exit(0)
+}
+
+func (n *Node) RedistributeResource(resource Resource) {
+	for _, peer := range n.peers {
+		if !n.IsPeerActive(peer) {
+			log.Printf("["+utils.Colorize("31", "ERROR")+"] Peer %s:%s is not reachable, skipping resource redistribution\n", peer.Host, peer.Port)
+			continue
+		}
+
+		resourceJSON, err := json.Marshal(resource)
+		if err != nil {
+			log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to marshal resource data\n")
+			continue
+		}
+
+		resp, err := http.Post(fmt.Sprintf("http://%s:%s/resource", peer.Host, peer.Port), "application/json", bytes.NewBuffer(resourceJSON))
+		if err == nil && resp.StatusCode == http.StatusOK {
+			log.Printf("["+utils.Colorize("33", "COMM")+"] Resource %s redistributed to peer %s:%s\n", resource.Path, peer.Host, peer.Port)
+			return
+		}
+	}
+
+	log.Printf("["+utils.Colorize("31", "ERROR")+"] Could not redistribute resource %s\n", resource.Path)
 }
 
 func (n *Node) AddTask(w http.ResponseWriter, r *http.Request) {
@@ -636,26 +653,36 @@ func (n *Node) RedistributeTasks(failedNode Peer) {
 	log.Printf("["+utils.Colorize("33", "COMM")+"] Redistributing %d tasks from failed node: %s:%s\n", len(tasksToRedistribute), failedNode.Host, failedNode.Port)
 
 	for _, task := range tasksToRedistribute {
-		go func(task Task) {
-			n.mu.Lock()
-			for _, peer := range n.peers {
-				peerJSON, err := json.Marshal(task)
-				if err != nil {
-					log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to marshal task data for redistribution\n")
-					continue
-				}
-
-				resp, err := http.Post(fmt.Sprintf("http://%s:%s/task", peer.Host, peer.Port), "application/json", bytes.NewBuffer(peerJSON))
-				if err == nil && resp.StatusCode == http.StatusOK {
-					log.Printf("["+utils.Colorize("33", "COMM")+"] Task redistributed to peer %s:%s\n", peer.Host, peer.Port)
-					n.mu.Unlock()
-					return
-				}
+		redistributed := false
+		for _, peer := range n.peers {
+			if !n.IsPeerActive(peer) {
+				log.Printf("["+utils.Colorize("31", "ERROR")+"] Peer %s:%s is not reachable, skipping redistribution\n", peer.Host, peer.Port)
+				continue
 			}
-			log.Printf("[" + utils.Colorize("31", "ERROR") + "] No available peers to redistribute task\n")
-			n.mu.Unlock()
-		}(task)
+
+			peerJSON, err := json.Marshal(task)
+			if err != nil {
+				log.Printf("[" + utils.Colorize("31", "ERROR") + "] Failed to marshal task data for redistribution\n")
+				continue
+			}
+
+			resp, err := http.Post(fmt.Sprintf("http://%s:%s/task", peer.Host, peer.Port), "application/json", bytes.NewBuffer(peerJSON))
+			if err == nil && resp.StatusCode == http.StatusOK {
+				log.Printf("["+utils.Colorize("33", "COMM")+"] Task redistributed to peer %s:%s\n", peer.Host, peer.Port)
+				redistributed = true
+				break
+			}
+		}
+
+		if !redistributed {
+			log.Printf("["+utils.Colorize("31", "ERROR")+"] Could not redistribute task %v\n", task)
+		}
 	}
+}
+
+func (n *Node) IsPeerActive(peer Peer) bool {
+	resp, err := http.Get(fmt.Sprintf("http://%s:%s/ping", peer.Host, peer.Port))
+	return err == nil && resp.StatusCode == http.StatusOK
 }
 
 func (n *Node) RequestResource(w http.ResponseWriter, r *http.Request) {
