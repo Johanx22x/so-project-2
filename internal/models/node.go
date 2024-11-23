@@ -17,17 +17,21 @@ type Node struct {
 	Port      string
 	Tasks     []Task
 	IsBusy    bool
+	MaxLoad   int
+	TaskQueue []Task
 	mu        sync.Mutex
 	peers     []Peer
 	Resources []Resource
 }
 
-func NewNode(host, port string) *Node {
+func NewNode(host, port string, maxLoad int) *Node {
 	return &Node{
 		Host:      host,
 		Port:      port,
 		Tasks:     []Task{},
 		IsBusy:    false,
+		MaxLoad:   maxLoad,
+		TaskQueue: []Task{},
 		peers:     []Peer{},
 		Resources: []Resource{},
 	}
@@ -245,8 +249,13 @@ func (n *Node) AddTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add task to the list
-	n.Tasks = append(n.Tasks, task)
-	log.Printf("[" + utils.Colorize("32", "INFO") + "] Task added\n")
+	if len(n.Tasks) < n.MaxLoad {
+		n.Tasks = append(n.Tasks, task)
+		log.Printf("[" + utils.Colorize("32", "INFO") + "] Task added directly to execution\n")
+	} else {
+		n.TaskQueue = append(n.TaskQueue, task)
+		log.Printf("[" + utils.Colorize("33", "INFO") + "] Task added to queue due to overload\n")
+	}
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -254,6 +263,14 @@ func (n *Node) AddTask(w http.ResponseWriter, r *http.Request) {
 func (n *Node) TaskLoop() {
 	for {
 		n.mu.Lock()
+
+		if len(n.Tasks) < n.MaxLoad && len(n.TaskQueue) > 0 {
+			// Mueve una tarea de la cola a la lista de tareas
+			nextTask := n.TaskQueue[0]
+			n.TaskQueue = n.TaskQueue[1:]
+			n.Tasks = append(n.Tasks, nextTask)
+			log.Printf("[" + utils.Colorize("32", "INFO") + "] Task moved from queue to execution\n")
+		}
 
 		// Check if there are tasks to do
 		if len(n.Tasks) == 0 {
@@ -279,6 +296,9 @@ func (n *Node) TaskLoop() {
 		if n.GetLeastLoadedPeer(task) {
 			// Remove task from queue if delegation was successful
 			n.Tasks = n.Tasks[1:]
+			log.Printf("[" + utils.Colorize("32", "INFO") + "] Task delegated to a peer\n")
+		} else {
+			log.Printf("[" + utils.Colorize("33", "INFO") + "] No peers available, task remains queued\n")
 		}
 
 		n.mu.Unlock()

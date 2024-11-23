@@ -14,6 +14,7 @@ import (
 
 func main() {
 	portFlag := flag.String("port", "", "Node port")
+	loadFlag := flag.Int("load", 10, "Maximum load capacity (default: 10)")
 	flag.Parse()
 
 	nodePort := getEnvOrDefault("NODE_PORT", *portFlag)
@@ -21,7 +22,12 @@ func main() {
 		log.Fatal("Missing required parameter: port")
 	}
 
-	node := models.NewNode("localhost", nodePort)
+	maxLoad := *loadFlag
+	if maxLoad <= 0 {
+		log.Fatal("Load capacity must be greater than 0")
+	}
+
+	node := models.NewNode("localhost", nodePort, maxLoad)
 
 	// Register routes
 	http.HandleFunc("/ping", node.Ping)
